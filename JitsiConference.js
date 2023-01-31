@@ -2343,7 +2343,17 @@ JitsiConference.prototype._setBridgeChannel = function(offerIq, pc) {
         wsUrl = webSocket[0].getAttribute('url');
     }
 
+    console.log('*******************', APP.store.getState())
+
     if (wsUrl) {
+        // DouDOU_a 暂时不使用videobridge配置地址，直接使用浏览器路径访问colibri-ws
+        const { locationURL } = APP.store.getState()['features/base/connection'];
+        if (locationURL?.protocol === 'https:') {
+            wsUrl = "wss://" + locationURL.host + wsUrl.substr(wsUrl.indexOf("/colibri-ws"))
+        } else {
+            wsUrl = "ws://" + locationURL.host + wsUrl.substr(wsUrl.indexOf("/colibri-ws"))
+        }
+        
         // If the offer contains a websocket use it.
         this.rtc.initializeBridgeChannel(null, wsUrl);
     } else {
