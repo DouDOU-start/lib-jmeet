@@ -6,6 +6,7 @@ import * as SignalingEvents from '../../service/RTC/SignalingEvents';
 import SignalingLayer, { getMediaTypeFromSourceName } from '../../service/RTC/SignalingLayer';
 import { VideoType } from '../../service/RTC/VideoType';
 import { XMPPEvents } from '../../service/xmpp/XMPPEvents';
+import FeatureFlags from '../flags/FeatureFlags';
 
 import { filterNodeFromPresenceJSON } from './ChatRoom';
 
@@ -80,45 +81,6 @@ export default class SignalingLayerImpl extends SignalingLayer {
     }
 
     /**
-     * Check is given endpoint has advertised <SourceInfo/> in it's presence which means that the source name signaling
-     * is used by this endpoint.
-     *
-     * @param {EndpointId} endpointId
-     * @returns {boolean}
-     */
-    _doesEndpointSendNewSourceInfo(endpointId) {
-        const presence = this.chatRoom?.getLastPresence(endpointId);
-
-        return Boolean(presence && presence.find(node => node.tagName === SOURCE_INFO_PRESENCE_ELEMENT));
-    }
-
-    /**
-     * Sets the <tt>ChatRoom</tt> instance used and binds presence listeners.
-     * @param {ChatRoom} room
-     */
-    setChatRoom(room) {
-        const oldChatRoom = this.chatRoom;
-
-        this.chatRoom = room;
-        if (oldChatRoom) {
-            oldChatRoom.removePresenceListener(
-                'audiomuted', this._audioMuteHandler);
-            oldChatRoom.removePresenceListener(
-                'videomuted', this._videoMuteHandler);
-            oldChatRoom.removePresenceListener(
-                'videoType', this._videoTypeHandler);
-            this._sourceInfoHandler
-                && oldChatRoom.removePresenceListener(SOURCE_INFO_PRESENCE_ELEMENT, this._sourceInfoHandler);
-            this._memberLeftHandler
-                && oldChatRoom.removeEventListener(XMPPEvents.MUC_MEMBER_LEFT, this._memberLeftHandler);
-        }
-        if (room) {
-            this._bindChatRoomEventHandlers(room);
-            this._addLocalSourceInfoToPresence();
-        }
-    }
-
-    /**
      * Binds event listeners to the chat room instance.
      * @param {ChatRoom} room
      * @private
@@ -180,12 +142,14 @@ export default class SignalingLayerImpl extends SignalingLayer {
                 = this._remoteSourceState[endpointId] || (this._remoteSourceState[endpointId] = {});
 
             for (const sourceName of Object.keys(sourceInfoJSON)) {
+                let sourceChanged = false;
                 const mediaType = getMediaTypeFromSourceName(sourceName);
                 const newMutedState = Boolean(sourceInfoJSON[sourceName].muted);
                 const oldSourceState = endpointSourceState[sourceName]
                     || (endpointSourceState[sourceName] = { sourceName });
 
                 if (oldSourceState.muted !== newMutedState) {
+                    sourceChanged = true;
                     oldSourceState.muted = newMutedState;
                     if (emitEventsFromHere && !this._localSourceState[sourceName]) {
                         this.eventEmitter.emit(SignalingEvents.SOURCE_MUTED_CHANGED, sourceName, newMutedState);
@@ -199,12 +163,22 @@ export default class SignalingLayerImpl extends SignalingLayer {
 
                 if (oldSourceState.videoType !== newVideoType) {
                     oldSourceState.videoType = newVideoType;
+                    sourceChanged = true;
 
                     // Since having a mix of eps that do/don't support multi-stream in the same call is supported, emit
                     // SOURCE_VIDEO_TYPE_CHANGED event when the remote source changes videoType.
                     if (emitEventsFromHere && !this._localSourceState[sourceName]) {
                         this.eventEmitter.emit(SignalingEvents.SOURCE_VIDEO_TYPE_CHANGED, sourceName, newVideoType);
                     }
+                }
+
+                if (sourceChanged && FeatureFlags.isSsrcRewritingSupported()) {
+                    this.eventEmitter.emit(
+                        SignalingEvents.SOURCE_UPDATED,
+                        sourceName,
+                        mucNick,
+                        newMutedState,
+                        newVideoType);
                 }
             }
 
@@ -235,28 +209,31 @@ export default class SignalingLayerImpl extends SignalingLayer {
     }
 
     /**
-     * Finds the first source of given media type for the given endpoint.
-     * @param endpointId
-     * @param mediaType
-     * @returns {SourceInfo|null}
-     * @private
+     * Check is given endpoint has advertised <SourceInfo/> in it's presence which means that the source name signaling
+     * is used by this endpoint.
+     *
+     * @param {EndpointId} endpointId
+     * @returns {boolean}
      */
-    _findEndpointSourceInfoForMediaType(endpointId, mediaType) {
-        const remoteSourceState = this._remoteSourceState[endpointId];
+    _doesEndpointSendNewSourceInfo(endpointId) {
+        const presence = this.chatRoom?.getLastPresence(endpointId);
 
-        if (!remoteSourceState) {
-            return null;
+        return Boolean(presence && presence.find(node => node.tagName === SOURCE_INFO_PRESENCE_ELEMENT));
+    }
+
+    /**
+     * Logs a debug or error message to console depending on whether SSRC rewriting is enabled or not.
+     * Owner changes are permitted only when SSRC rewriting is enabled.
+     *
+     * @param {string} message - The message to be logged.
+     * @returns {void}
+     */
+    _logOwnerChangedMessage(message) {
+        if (FeatureFlags.isSsrcRewritingSupported()) {
+            logger.debug(message);
+        } else {
+            logger.error(message);
         }
-
-        for (const sourceInfo of Object.values(remoteSourceState)) {
-            const _mediaType = getMediaTypeFromSourceName(sourceInfo.sourceName);
-
-            if (_mediaType === mediaType) {
-                return sourceInfo;
-            }
-        }
-
-        return null;
     }
 
     /**
@@ -325,6 +302,52 @@ export default class SignalingLayerImpl extends SignalingLayer {
     /**
      * @inheritDoc
      */
+    getTrackSourceName(ssrc) {
+        return this._sourceNames.get(ssrc);
+    }
+
+    /**
+     * @inheritDoc
+     */
+    removeSSRCOwners(ssrcList) {
+        if (!ssrcList?.length) {
+            return;
+        }
+
+        for (const ssrc of ssrcList) {
+            this.ssrcOwners.delete(ssrc);
+        }
+    }
+
+    /**
+     * Sets the <tt>ChatRoom</tt> instance used and binds presence listeners.
+     * @param {ChatRoom} room
+     */
+    setChatRoom(room) {
+        const oldChatRoom = this.chatRoom;
+
+        this.chatRoom = room;
+        if (oldChatRoom) {
+            oldChatRoom.removePresenceListener(
+                'audiomuted', this._audioMuteHandler);
+            oldChatRoom.removePresenceListener(
+                'videomuted', this._videoMuteHandler);
+            oldChatRoom.removePresenceListener(
+                'videoType', this._videoTypeHandler);
+            this._sourceInfoHandler
+                && oldChatRoom.removePresenceListener(SOURCE_INFO_PRESENCE_ELEMENT, this._sourceInfoHandler);
+            this._memberLeftHandler
+                && oldChatRoom.removeEventListener(XMPPEvents.MUC_MEMBER_LEFT, this._memberLeftHandler);
+        }
+        if (room) {
+            this._bindChatRoomEventHandlers(room);
+            this._addLocalSourceInfoToPresence();
+        }
+    }
+
+    /**
+     * @inheritDoc
+     */
     setSSRCOwner(ssrc, endpointId) {
         if (typeof ssrc !== 'number') {
             throw new TypeError(`SSRC(${ssrc}) must be a number`);
@@ -335,7 +358,7 @@ export default class SignalingLayerImpl extends SignalingLayer {
         const existingOwner = this.ssrcOwners.get(ssrc);
 
         if (existingOwner && existingOwner !== endpointId) {
-            logger.error(`SSRC owner re-assigned from ${existingOwner} to ${endpointId}`);
+            this._logOwnerChangedMessage(`SSRC owner re-assigned from ${existingOwner} to ${endpointId}`);
         }
         this.ssrcOwners.set(ssrc, endpointId);
     }
@@ -360,6 +383,25 @@ export default class SignalingLayerImpl extends SignalingLayer {
     /**
      * @inheritDoc
      */
+    setTrackSourceName(ssrc, sourceName) {
+        if (typeof ssrc !== 'number') {
+            throw new TypeError(`SSRC(${ssrc}) must be a number`);
+        }
+
+        // Now signaling layer instance is shared between different JingleSessionPC instances, so although very unlikely
+        // an SSRC conflict could potentially occur. Log a message to make debugging easier.
+        const existingName = this._sourceNames.get(ssrc);
+
+        if (existingName && existingName !== sourceName) {
+            this._logOwnerChangedMessage(`SSRC(${ssrc}) sourceName re-assigned from ${existingName} to ${sourceName}`);
+        }
+
+        this._sourceNames.set(ssrc, sourceName);
+    }
+
+    /**
+     * @inheritDoc
+     */
     setTrackVideoType(sourceName, videoType) {
         if (!this._localSourceState[sourceName]) {
             this._localSourceState[sourceName] = {};
@@ -378,27 +420,16 @@ export default class SignalingLayerImpl extends SignalingLayer {
     /**
      * @inheritDoc
      */
-    getTrackSourceName(ssrc) {
-        return this._sourceNames.get(ssrc);
-    }
+    updateSsrcOwnersOnLeave(id) {
+        const ssrcs = Array.from(this.ssrcOwners)
+            .filter(entry => entry[1] === id)
+            .map(entry => entry[0]);
 
-    /**
-     * @inheritDoc
-     */
-    setTrackSourceName(ssrc, sourceName) {
-        if (typeof ssrc !== 'number') {
-            throw new TypeError(`SSRC(${ssrc}) must be a number`);
+        if (!ssrcs?.length) {
+            return;
         }
 
-        // Now signaling layer instance is shared between different JingleSessionPC instances, so although very unlikely
-        // an SSRC conflict could potentially occur. Log a message to make debugging easier.
-        const existingName = this._sourceNames.get(ssrc);
-
-        if (existingName && existingName !== sourceName) {
-            logger.error(`SSRC(${ssrc}) sourceName re-assigned from ${existingName} to ${sourceName}`);
-        }
-
-        this._sourceNames.set(ssrc, sourceName);
+        this.removeSSRCOwners(ssrcs);
     }
 
 }

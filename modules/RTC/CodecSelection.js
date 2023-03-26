@@ -62,9 +62,6 @@ export class CodecSelection {
         this.conference.on(
             JitsiConferenceEvents.USER_LEFT,
             () => this._selectPreferredCodec());
-        this.conference.on(
-            JitsiConferenceEvents._MEDIA_SESSION_STARTED,
-            session => this._selectPreferredCodec(session));
     }
 
     /**
@@ -130,7 +127,7 @@ export class CodecSelection {
                     ?? nonPreferredCodecs.find(codec => this._isCodecSupported(codec));
             }
         }
-        if (selectedCodec !== currentCodec || disabledCodec) {
+        if (selectedCodec !== currentCodec || !session?.peerconnection.isVideoCodecDisabled(disabledCodec)) {
             session.setVideoCodecs(selectedCodec, disabledCodec);
         }
     }

@@ -92,6 +92,40 @@ export function filterNodeFromPresenceJSON(pres, nodeName) {
 const MEMBERS_AFFILIATIONS = [ 'owner', 'admin', 'member' ];
 
 /**
+ * Process nodes to extract data needed for MUC_JOINED and MUC_MEMBER_JOINED events.
+ *
+ */
+function extractIdentityInformation(node, hiddenFromRecorderFeatureEnabled) {
+    const identity = {};
+    const userInfo = node.children.find(c => c.tagName === 'user');
+
+    if (userInfo) {
+        identity.user = {};
+        const tags = [ 'id', 'name', 'avatar' ];
+
+        if (hiddenFromRecorderFeatureEnabled) {
+            tags.push('hidden-from-recorder');
+        }
+
+        for (const tag of tags) {
+            const child
+                = userInfo.children.find(c => c.tagName === tag);
+
+            if (child) {
+                identity.user[tag] = child.value;
+            }
+        }
+    }
+    const groupInfo = node.children.find(c => c.tagName === 'group');
+
+    if (groupInfo) {
+        identity.group = groupInfo.value;
+    }
+
+    return identity;
+}
+
+/**
  *
  */
 export default class ChatRoom extends Listenable {
@@ -113,9 +147,9 @@ export default class ChatRoom extends Listenable {
      * @param {boolean} options.hiddenFromRecorderFeatureEnabled - when set to {@code true} we will check identity tag
      * for node presence.
      */
-    constructor(connection, jid, password, XMPP, options) {
+    constructor(connection, jid, password, xmpp, options) {
         super();
-        this.xmpp = XMPP;
+        this.xmpp = xmpp;
         this.connection = connection;
         this.roomjid = Strophe.getBareJidFromJid(jid);
         this.myroomjid = jid;
@@ -132,7 +166,7 @@ export default class ChatRoom extends Listenable {
         this.focusMucJid = null;
         this.noBridgeAvailable = false;
         this.options = options || {};
-        this.moderator = new Moderator(this.roomjid, this.xmpp, this.eventEmitter, options);
+        this.moderator = new Moderator(this.roomjid, this.xmpp, this.eventEmitter, xmpp.options);
         if (typeof this.options.enableLobby === 'undefined' || this.options.enableLobby) {
             this.lobby = new Lobby(this);
         }
@@ -496,38 +530,6 @@ export default class ChatRoom extends Listenable {
         parser.packet2JSON(pres, nodes);
         this.lastPresences[from] = nodes;
 
-        // process nodes to extract data needed for MUC_JOINED and
-        // MUC_MEMBER_JOINED events
-        const extractIdentityInformation = node => {
-            const identity = {};
-            const userInfo = node.children.find(c => c.tagName === 'user');
-
-            if (userInfo) {
-                identity.user = {};
-                const tags = [ 'id', 'name', 'avatar' ];
-
-                if (this.options.hiddenFromRecorderFeatureEnabled) {
-                    tags.push('hidden-from-recorder');
-                }
-
-                for (const tag of tags) {
-                    const child
-                        = userInfo.children.find(c => c.tagName === tag);
-
-                    if (child) {
-                        identity.user[tag] = child.value;
-                    }
-                }
-            }
-            const groupInfo = node.children.find(c => c.tagName === 'group');
-
-            if (groupInfo) {
-                identity.group = groupInfo.value;
-            }
-
-            return identity;
-        };
-
         for (let i = 0; i < nodes.length; i++) {
             const node = nodes[i];
 
@@ -553,7 +555,7 @@ export default class ChatRoom extends Listenable {
                 member.statsID = node.value;
                 break;
             case 'identity':
-                member.identity = extractIdentityInformation(node);
+                member.identity = extractIdentityInformation(node, this.options.hiddenFromRecorderFeatureEnabled);
                 break;
             case 'features': {
                 member.features = this._extractFeatures(node);
@@ -1567,6 +1569,23 @@ export default class ChatRoom extends Listenable {
      */
     isModerator() {
         return this.role === 'moderator';
+    }
+
+    /**
+     * Redirected back.
+     * @param iq The received iq.
+     */
+    onVisitorIQ(iq) {
+        const visitors = $(iq).find('>visitors[xmlns="jitsi:visitors"]');
+        const response = $(iq).find('promotion-response');
+
+        if (visitors.length && response.length
+            && String(response.attr('allow')).toLowerCase() === 'true') {
+            logger.warn('Redirected back to main room.');
+
+            this.eventEmitter.emit(
+                XMPPEvents.REDIRECTED, undefined, visitors.attr('focusjid'), response.attr('username'));
+        }
     }
 
     /**

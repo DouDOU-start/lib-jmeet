@@ -29,7 +29,7 @@
     "lodash.isequal": "4.5.0",
     "promise.allsettled": "1.0.4",
     "sdp-transform": "2.3.0",
-    "strophe.js": "1.3.4",
+    "strophe.js": "1.6.0",
     "strophejs-plugin-disco": "0.0.2",
     "strophejs-plugin-stream-management": "1.0.0",
     "uuid": "8.1.0",
@@ -57,13 +57,14 @@
     "process": "0.11.10",
     "string-replace-loader": "3.0.3",
     "typescript": "4.3.5",
-    "webpack": "5.57.1",
+    "webpack": "5.76.0",
     "webpack-bundle-analyzer": "4.4.2",
     "webpack-cli": "4.9.0"
   },
   "scripts": {
     "build": "npm run build:webpack && npm run build:tsc",
     "build:webpack": "LIB_JITSI_MEET_COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null) webpack",
+    "build:webpack-dev": "webpack --mode development",
     "build:tsc": "tsc --build --clean && tsc",
     "gen-types": "tsc --declaration --declarationDir types/auto --emitDeclarationOnly",
     "lint": "eslint .",
@@ -79,7 +80,6 @@
   "files": [
     "dist",
     "types",
-    "connection_optimization/external_connect.js",
     "modules/browser/capabilities.json"
   ],
   "license": "Apache-2.0"

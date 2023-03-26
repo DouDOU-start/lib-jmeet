@@ -21,8 +21,9 @@ export default class BridgeChannel {
      * instance.
      * @param {string} [wsUrl] WebSocket URL.
      * @param {EventEmitter} emitter the EventEmitter instance to use for event emission.
+     * @param {JitsiConference} conference the conference instance.
      */
-    constructor(peerconnection, wsUrl, emitter) {
+    constructor(peerconnection, wsUrl, emitter, conference) {
         if (!peerconnection && !wsUrl) {
             throw new TypeError('At least peerconnection or wsUrl must be given');
         } else if (peerconnection && wsUrl) {
@@ -38,6 +39,9 @@ export default class BridgeChannel {
         // The underlying WebRTC RTCDataChannel or WebSocket instance.
         // @type {RTCDataChannel|WebSocket}
         this._channel = null;
+
+        // The conference that uses this bridge channel.
+        this._conference = conference;
 
         // Whether the channel is connected or not. It will start as undefined
         // for the first connection attempt. Then transition to either true or false.
@@ -233,41 +237,11 @@ export default class BridgeChannel {
     }
 
     /**
-     * Sends a "selected endpoints changed" message via the channel.
-     *
-     * @param {Array<string>} endpointIds - The ids of the selected endpoints.
-     * @throws NetworkError or InvalidStateError from RTCDataChannel#send (@see
-     * {@link https://developer.mozilla.org/docs/Web/API/RTCDataChannel/send})
-     * or from WebSocket#send or Error with "No opened channel" message.
-     */
-    sendSelectedEndpointsMessage(endpointIds) {
-        logger.log(`Sending selected endpoints: ${endpointIds}.`);
-
-        this._send({
-            colibriClass: 'SelectedEndpointsChangedEvent',
-            selectedEndpoints: endpointIds
-        });
-    }
-
-    /**
-     * Sends a "receiver video constraint" message via the channel.
-     * @param {Number} maxFrameHeightPixels the maximum frame height,
-     * in pixels, this receiver is willing to receive
-     */
-    sendReceiverVideoConstraintMessage(maxFrameHeightPixels) {
-        logger.log(`Sending ReceiverVideoConstraint with maxFrameHeight=${maxFrameHeightPixels}px`);
-        this._send({
-            colibriClass: 'ReceiverVideoConstraint',
-            maxFrameHeight: maxFrameHeightPixels
-        });
-    }
-
-    /**
      * Sends a 'ReceiverVideoConstraints' message via the bridge channel.
      *
      * @param {ReceiverVideoConstraints} constraints video constraints.
      */
-    sendNewReceiverVideoConstraintsMessage(constraints) {
+    sendReceiverVideoConstraintsMessage(constraints) {
         logger.log(`Sending ReceiverVideoConstraints with ${JSON.stringify(constraints)}`);
         this._send({
             colibriClass: 'ReceiverVideoConstraints',
@@ -276,21 +250,7 @@ export default class BridgeChannel {
     }
 
     /**
-     * Sends a 'VideoTypeMessage' message via the bridge channel.
-     *
-     * @param {string} videoType 'camera', 'desktop' or 'none'.
-     * @deprecated to be replaced with sendSourceVideoTypeMessage
-     */
-    sendVideoTypeMessage(videoType) {
-        logger.debug(`Sending VideoTypeMessage with video type as ${videoType}`);
-        this._send({
-            colibriClass: 'VideoTypeMessage',
-            videoType
-        });
-    }
-
-    /**
-     * Sends a 'VideoTypeMessage' message via the bridge channel.
+     * Sends a 'SourceVideoTypeMessage' message via the bridge channel.
      *
      * @param {BridgeVideoType} videoType - the video type.
      * @param {SourceName} sourceName - the source name of the video track.
@@ -377,15 +337,6 @@ export default class BridgeChannel {
 
                 break;
             }
-            case 'SenderVideoConstraints': {
-                const videoConstraints = obj.videoConstraints;
-
-                if (videoConstraints) {
-                    logger.info(`SenderVideoConstraints: ${JSON.stringify(videoConstraints)}`);
-                    emitter.emit(RTCEvents.SENDER_VIDEO_CONSTRAINTS_CHANGED, videoConstraints);
-                }
-                break;
-            }
             case 'SenderSourceConstraints': {
                 if (typeof obj.sourceName === 'string' && typeof obj.maxHeight === 'number') {
                     logger.info(`SenderSourceConstraints: ${obj.sourceName} - ${obj.maxHeight}`);
@@ -430,27 +381,32 @@ export default class BridgeChannel {
                 return;
             }
 
-            if (this._mode === 'websocket') {
-                if (!this._closedFromClient) {
-                    this._retryWebSocketConnection(event);
-                }
-            }
+            // When the JVB closes the connection gracefully due to the participant being alone in the meeting it uses
+            // code 1001. However, the same code is also used by Cloudflare when it terminates the ws. Therefore, check
+            // for the number of remote participants in the call and abort retries only when the endpoint is the only
+            // endpoint in the call.
+            const isGracefulClose = this._closedFromClient
+                || (event.code === 1001 && this._conference.getParticipantCount() === 1);
 
-            if (!this._closedFromClient) {
+            if (!isGracefulClose) {
                 const { code, reason } = event;
 
                 logger.error(`Channel closed: ${code} ${reason}`);
 
-                // We only want to send this event the first time the failure happens.
-                if (typeof this._connected === 'undefined' || this._connected) {
-                    this._connected = false;
+                if (this._mode === 'websocket') {
+                    this._retryWebSocketConnection(event);
 
-                    emitter.emit(RTCEvents.DATA_CHANNEL_CLOSED, {
-                        code,
-                        reason
-                    });
+                    // We only want to send this event the first time the failure happens.
+                    if (this._connected !== false) {
+                        emitter.emit(RTCEvents.DATA_CHANNEL_CLOSED, {
+                            code,
+                            reason
+                        });
+                    }
                 }
             }
+
+            this._connected = false;
 
             // Remove the channel.
             this._channel = null;
